@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -122,6 +123,32 @@ impl Drop for Interface {
     }
 }
 
+#[derive(Parser)]
+#[command(version, about)]
+struct Cli {
+    #[command(subcommand)]
+    commands: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    AddFlake {
+        name: String,
+        path: PathBuf,
+    },
+    EnableFlake {
+        name: String,
+    },
+    DisableFlake {
+        name: String,
+    },
+    RemoveFlake {
+        name: String,
+    },
+    UpdateFlakes,
+    //TODO: ListFlakes,
+}
+
 fn main() {
     let mut config_path = if let Some(config_path) = env::var_os("MY_APP_CONFIG") {
         config_path.into()
@@ -132,5 +159,17 @@ fn main() {
     config_path.push("config.csv");
 
     let mut interface = Interface::new(config_path.into());
-    interface.add_flake("a".to_owned(), ".".into());
+    
+    // TODO: remove
+    use clap::CommandFactory;
+    Cli::command().debug_assert();
+
+    let cli = Cli::parse();
+    match cli.commands {
+        Commands::AddFlake { name, path } => interface.add_flake(name, path),
+        Commands::EnableFlake { name } => interface.enable_flake(name),
+        Commands::DisableFlake { name } => interface.disable_flake(name),
+        Commands::RemoveFlake { name } => interface.remove_flake(name),
+        Commands::UpdateFlakes => interface.update_flakes(),
+    }
 }
