@@ -1,5 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::{
+    env,
+    fs::File,
+    path::{Path, PathBuf},
+};
 
+use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
 struct Flake {
     name: String,
     path: PathBuf,
@@ -7,6 +15,7 @@ struct Flake {
 }
 
 struct Interface {
+    path: PathBuf,
     flakes: Vec<Flake>,
 }
 
@@ -37,6 +46,24 @@ fn update_flake(path: &Path) {
 
 // disable : keep in the list, but doesn't update
 impl Interface {
+    fn new(path: PathBuf) -> Self {
+        let mut flakes = Vec::new();
+
+        if !path.exists() {
+            // TODO: find how to create the directories in the path too
+            File::create_new(&path).unwrap();
+        }
+
+        let file = File::open(&path).unwrap();
+        let mut reader = csv::Reader::from_reader(file);
+        for result in reader.deserialize() {
+            let flake = result.unwrap();
+            flakes.push(flake);
+        }
+
+        Self { path, flakes }
+    }
+
     fn get_flake_mut(&mut self, name: &str) -> Option<&mut Flake> {
         self.flakes.iter_mut().find(|flake| flake.name == name)
     }
@@ -64,12 +91,14 @@ impl Interface {
         let mut idx = None;
         for (i, flake) in self.flakes.iter().enumerate() {
             if flake.name == name {
-                Some(i);
+                idx = Some(i);
                 break;
             }
         }
         match idx {
-            Some(i) => { self.flakes.swap_remove(i); }
+            Some(i) => {
+                self.flakes.swap_remove(i);
+            }
             None => (), // TODO: warning
         }
     }
@@ -83,6 +112,25 @@ impl Interface {
     }
 }
 
+impl Drop for Interface {
+    fn drop(&mut self) {
+        let file = File::create(&self.path).unwrap();
+        let mut writer = csv::Writer::from_writer(file);
+        for flake in &self.flakes {
+            writer.serialize(flake).unwrap()
+        }
+    }
+}
+
 fn main() {
-    println!("Hello, world!");
+    let mut config_path = if let Some(config_path) = env::var_os("MY_APP_CONFIG") {
+        config_path.into()
+    } else {
+        let project_dir = ProjectDirs::from("", "", "my-app").unwrap();
+        project_dir.config_local_dir().to_owned()
+    };
+    config_path.push("config.csv");
+
+    let mut interface = Interface::new(config_path.into());
+    interface.add_flake("a".to_owned(), ".".into());
 }
