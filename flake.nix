@@ -1,5 +1,5 @@
 {
-  description = "Allows to update all tracked nix flake of your machine in one go";
+  description = "Allows to update all tracked flakes of your machine in one go";
   inputs = {
     nixpkgs.url = github:NixOS/nixpkgs/nixpkgs-unstable;
     utils.url = github:numtide/flake-utils;
@@ -28,7 +28,7 @@
         };
       in {
         defaultPackage = naerskLib.buildPackage {
-          pname = "nix-update-env";
+          pname = "nix-update-flake";
           root = ./.;
         };
         defaultApp = utils.lib.mkApp {

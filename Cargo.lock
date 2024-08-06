@@ -3,5 +3,5 @@
 version = 3
 
 [[package]]
-name = "nix-update-env"
+name = "nix-update-flake"
 version = "0.1.0"
