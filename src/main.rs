@@ -1,12 +1,14 @@
 use std::{
     env,
-    fs::File,
+    fs::{DirBuilder, File},
     path::{Path, PathBuf},
 };
 
 use clap::{Parser, Subcommand};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+
+const CONFIG_FILE: &'static str = "config.csv";
 
 #[derive(Serialize, Deserialize)]
 struct Flake {
@@ -47,11 +49,17 @@ fn update_flake(path: &Path) {
 
 // disable : keep in the list, but doesn't update
 impl Interface {
-    fn new(path: PathBuf) -> Self {
+    fn new(mut path: PathBuf) -> Self {
         let mut flakes = Vec::new();
 
+        path.push(CONFIG_FILE);
         if !path.exists() {
             // TODO: find how to create the directories in the path too
+            DirBuilder::new()
+                .recursive(true)
+                // cannot panic because the path has at least one component, CONFIG_FILE
+                .create(path.parent().unwrap())
+                .unwrap();
             File::create_new(&path).unwrap();
         }
 
@@ -150,13 +158,12 @@ enum Commands {
 }
 
 fn main() {
-    let mut config_path = if let Some(config_path) = env::var_os("MY_APP_CONFIG") {
+    let config_path = if let Some(config_path) = env::var_os("MY_APP_CONFIG") {
         config_path.into()
     } else {
         let project_dir = ProjectDirs::from("", "", "my-app").unwrap();
         project_dir.config_local_dir().to_owned()
     };
-    config_path.push("config.csv");
 
     let mut interface = Interface::new(config_path.into());
     
