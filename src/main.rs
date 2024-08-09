@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -119,6 +119,24 @@ impl Interface {
             }
         }
     }
+
+    fn list_flakes(&self, filter: ListFilter) {
+        for flake in &self.flakes {
+            let selected = (filter.enabled && flake.enabled) || (filter.disabled && !flake.enabled);
+            if selected {
+                // TODO: print flake
+            }
+        }
+    }
+
+    fn info_flake(&self, name: String) {
+        let _flake = self
+            .flakes
+            .iter()
+            .find(|flake| &flake.name == &name)
+            .unwrap();
+        // TODO: print flake
+    }
 }
 
 impl Drop for Interface {
@@ -132,29 +150,46 @@ impl Drop for Interface {
 }
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about, long_about = None)]
 struct Cli {
     #[command(subcommand)]
     commands: Commands,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Subcommand)]
 enum Commands {
-    AddFlake {
+    Add {
         name: String,
         path: PathBuf,
     },
-    EnableFlake {
+    Enable {
         name: String,
     },
-    DisableFlake {
+    Disable {
         name: String,
     },
-    RemoveFlake {
+    Remove {
         name: String,
     },
-    UpdateFlakes,
-    //TODO: ListFlakes,
+    Update,
+    List {
+        #[command(flatten)]
+        filter: ListFilter,
+    },
+    Info {
+        name: String,
+    },
+}
+
+#[derive(Args)]
+#[group(multiple = false)]
+struct ListFilter {
+    /// only list enabled flakes
+    #[arg(short, long)]
+    enabled: bool,
+    /// only list disabled flakes
+    #[arg(short, long)]
+    disabled: bool,
 }
 
 fn main() {
@@ -166,17 +201,19 @@ fn main() {
     };
 
     let mut interface = Interface::new(config_path.into());
-    
+
     // TODO: remove
     use clap::CommandFactory;
     Cli::command().debug_assert();
 
     let cli = Cli::parse();
     match cli.commands {
-        Commands::AddFlake { name, path } => interface.add_flake(name, path),
-        Commands::EnableFlake { name } => interface.enable_flake(name),
-        Commands::DisableFlake { name } => interface.disable_flake(name),
-        Commands::RemoveFlake { name } => interface.remove_flake(name),
-        Commands::UpdateFlakes => interface.update_flakes(),
+        Commands::Add { name, path } => interface.add_flake(name, path),
+        Commands::Enable { name } => interface.enable_flake(name),
+        Commands::Disable { name } => interface.disable_flake(name),
+        Commands::Remove { name } => interface.remove_flake(name),
+        Commands::Update => interface.update_flakes(),
+        Commands::List { filter } => interface.list_flakes(filter),
+        Commands::Info { name } => interface.info_flake(name),
     }
 }
