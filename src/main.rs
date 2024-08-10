@@ -82,7 +82,7 @@ impl Interface {
         check_flake(&path);
         let flake = Flake {
             name,
-            path,
+            path: path.canonicalize().unwrap(),
             enabled: true,
         };
         self.flakes.push(flake);
