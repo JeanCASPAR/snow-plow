@@ -147,12 +147,20 @@ impl Interface {
     }
 
     fn info_flake(&self, name: String) {
-        let _flake = self
+        let flake = self
             .flakes
             .iter()
             .find(|flake| &flake.name == &name)
             .unwrap();
-        // TODO: print flake
+        println!("{}:{};{}", // TODO: bot readable (no color), human readable (spaces between : and ;)
+            Style::new().bold().paint(&flake.name),
+            flake.path.display(),
+            if flake.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
     }
 }
 
