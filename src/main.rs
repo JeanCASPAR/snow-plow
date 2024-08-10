@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use ansi_term::Style;
 use clap::{Args, Parser, Subcommand};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
@@ -121,10 +122,26 @@ impl Interface {
     }
 
     fn list_flakes(&self, filter: ListFilter) {
+        let some_filter = filter.enabled || filter.disabled;
         for flake in &self.flakes {
-            let selected = (filter.enabled && flake.enabled) || (filter.disabled && !flake.enabled);
+            let selected = !some_filter
+                || (filter.enabled && flake.enabled)
+                || (filter.disabled && !flake.enabled);
             if selected {
-                // TODO: print flake
+                let line = format!(
+                    "{}:{}",
+                    Style::new().bold().paint(&flake.name),
+                    flake.path.display(),
+                );
+                if !some_filter {
+                    if flake.enabled {
+                        println!("{};enabled", line)
+                    } else {
+                        println!("{};disabled", line)
+                    }
+                } else {
+                    println!("{}", line);
+                };
             }
         }
     }
