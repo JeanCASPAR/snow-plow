@@ -28,7 +28,7 @@
         };
       in {
         defaultPackage = naerskLib.buildPackage {
-          pname = "nix-update-flake";
+          pname = "snow-plow";
           root = ./.;
         };
         defaultApp = utils.lib.mkApp {

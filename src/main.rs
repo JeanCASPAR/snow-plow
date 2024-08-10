@@ -193,10 +193,10 @@ struct ListFilter {
 }
 
 fn main() {
-    let config_path = if let Some(config_path) = env::var_os("MY_APP_CONFIG") {
+    let config_path = if let Some(config_path) = env::var_os("SNOW_PLOW_CONFIG") {
         config_path.into()
     } else {
-        let project_dir = ProjectDirs::from("", "", "my-app").unwrap();
+        let project_dir = ProjectDirs::from("", "", "snow-plow").unwrap();
         project_dir.config_local_dir().to_owned()
     };
 
