@@ -1,11 +1,13 @@
 use std::{
-    env,
+    borrow::Cow,
+    env, fmt,
     fs::{DirBuilder, File},
+    io::{self, IsTerminal},
     path::{Path, PathBuf},
 };
 
-use ansi_term::Style;
-use clap::{Args, Parser, Subcommand};
+use ansi_term::{ANSIGenericString, Style};
+use clap::{Args, ColorChoice, Parser, Subcommand};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +23,8 @@ struct Flake {
 struct Interface {
     path: PathBuf,
     flakes: Vec<Flake>,
+    stdout_color: bool,
+    stderr_color: bool,
 }
 
 fn check_flake(path: &Path) {
@@ -48,9 +52,22 @@ fn update_flake(path: &Path) {
     }
 }
 
+fn apply_style<'a, S, I>(style: Style, input: I, style_enabled: bool) -> ANSIGenericString<'a, S>
+where
+    S: 'a + ToOwned + ?Sized,
+    I: Into<Cow<'a, S>>,
+    <S as ToOwned>::Owned: fmt::Debug,
+{
+    if style_enabled {
+        style.paint(input)
+    } else {
+        Style::new().paint(input)
+    }
+}
+
 // disable : keep in the list, but doesn't update
 impl Interface {
-    fn new(mut path: PathBuf) -> Self {
+    fn new(mut path: PathBuf, color: ColorChoice) -> Self {
         let mut flakes = Vec::new();
 
         path.push(CONFIG_FILE);
@@ -71,7 +88,18 @@ impl Interface {
             flakes.push(flake);
         }
 
-        Self { path, flakes }
+        let (stdout_color, stderr_color) = match color {
+            ColorChoice::Auto => (io::stdout().is_terminal(), io::stderr().is_terminal()),
+            ColorChoice::Always => (true, true),
+            ColorChoice::Never => (false, false),
+        };
+
+        Self {
+            path,
+            flakes,
+            stdout_color,
+            stderr_color,
+        }
     }
 
     fn get_flake_mut(&mut self, name: &str) -> Option<&mut Flake> {
@@ -129,15 +157,15 @@ impl Interface {
                 || (filter.disabled && !flake.enabled);
             if selected {
                 let line = format!(
-                    "{}:{}",
-                    Style::new().bold().paint(&flake.name),
+                    "{} {}",
+                    apply_style(Style::new().bold(), &flake.name, self.stdout_color),
                     flake.path.display(),
                 );
                 if !some_filter {
                     if flake.enabled {
-                        println!("{};enabled", line)
+                        println!("{} enabled", line)
                     } else {
-                        println!("{};disabled", line)
+                        println!("{} disabled", line)
                     }
                 } else {
                     println!("{}", line);
@@ -152,14 +180,11 @@ impl Interface {
             .iter()
             .find(|flake| &flake.name == &name)
             .unwrap();
-        println!("{}:{};{}", // TODO: bot readable (no color), human readable (spaces between : and ;)
-            Style::new().bold().paint(&flake.name),
+        println!(
+            "{} {} {}",
+            apply_style(Style::new().bold(), &flake.name, self.stdout_color),
             flake.path.display(),
-            if flake.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            }
+            if flake.enabled { "enabled" } else { "disabled" }
         );
     }
 }
@@ -179,6 +204,8 @@ impl Drop for Interface {
 struct Cli {
     #[command(subcommand)]
     commands: Commands,
+    #[arg(long, short, default_value = "auto", global = true)]
+    style: ColorChoice,
 }
 
 #[derive(Subcommand)]
@@ -225,13 +252,13 @@ fn main() {
         project_dir.config_local_dir().to_owned()
     };
 
-    let mut interface = Interface::new(config_path.into());
-
     // TODO: remove
     use clap::CommandFactory;
     Cli::command().debug_assert();
 
     let cli = Cli::parse();
+
+    let mut interface = Interface::new(config_path.into(), cli.style);
     match cli.commands {
         Commands::Add { name, path } => interface.add_flake(name, path),
         Commands::Enable { name } => interface.enable_flake(name),
