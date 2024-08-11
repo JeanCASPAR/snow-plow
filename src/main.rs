@@ -7,12 +7,12 @@ use std::{
     path::{self, Path, PathBuf},
 };
 
-use ansi_term::{ANSIGenericString, Style};
+use ansi_term::{ANSIGenericString, Colour, Style};
 use clap::{Args, ColorChoice, Parser, Subcommand};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-const CONFIG_FILE: &'static str = "config.csv";
+const CONFIG_FILE: &str = "config.csv";
 
 /// Used for serializing flakes.
 #[derive(Serialize, Deserialize)]
@@ -22,13 +22,13 @@ struct NamedFlake {
     enabled: bool,
 }
 
-impl Into<(String, Flake)> for NamedFlake {
-    fn into(self) -> (String, Flake) {
+impl From<NamedFlake> for (String, Flake) {
+    fn from(named_flake: NamedFlake) -> (String, Flake) {
         let flake = Flake {
-            path: self.path,
-            enabled: self.enabled,
+            path: named_flake.path,
+            enabled: named_flake.enabled,
         };
-        (self.name, flake)
+        (named_flake.name, flake)
     }
 }
 
@@ -104,11 +104,39 @@ where
     }
 }
 
+/// Log a message on stderr
+fn log(msg: &str, level: &str) {
+    eprintln!("{}: snow-plow: {}", level, msg);
+}
+
+/// Raise a warning
+fn warn(msg: &str, stderr_style: bool) {
+    let level = apply_style(
+        Style::new().bold().fg(Colour::Yellow),
+        "warning",
+        stderr_style,
+    )
+    .to_string();
+    log(msg, &level);
+}
+
+/// Raise an error
+fn error(msg: &str, stderr_style: bool) {
+    let level = apply_style(Style::new().bold().fg(Colour::Red), "error", stderr_style).to_string();
+    log(msg, &level);
+}
+
 impl Interface {
     /// Create a new `Interface`, reading the configuration from `config_dir/CONFIG_FILE`,
     /// creating it if necessary.
     fn new(config_dir: PathBuf, style: ColorChoice) -> Self {
         let mut flakes = HashMap::new();
+
+        let (stdout_style, stderr_style) = match style {
+            ColorChoice::Auto => (io::stdout().is_terminal(), io::stderr().is_terminal()),
+            ColorChoice::Always => (true, true),
+            ColorChoice::Never => (false, false),
+        };
 
         let mut config_path = config_dir.clone();
         config_path.push(CONFIG_FILE);
@@ -125,16 +153,15 @@ impl Interface {
         for result in reader.deserialize() {
             let named_flake: NamedFlake = result.unwrap();
             let (name, flake) = named_flake.into();
-            if let Some(_) = flakes.insert(name, flake) {
-                // TODO: warning
+            if let Some(old_flake) = flakes.insert(name.clone(), flake) {
+                let msg = format!(
+                    "flake `{}` is present several time in the file. \"{}\" has been removed.",
+                    name,
+                    old_flake.path.display(),
+                );
+                warn(&msg, stderr_style);
             }
         }
-
-        let (stdout_style, stderr_style) = match style {
-            ColorChoice::Auto => (io::stdout().is_terminal(), io::stderr().is_terminal()),
-            ColorChoice::Always => (true, true),
-            ColorChoice::Never => (false, false),
-        };
 
         Self {
             config_path,
@@ -151,23 +178,36 @@ impl Interface {
             enabled: true,
         };
         if let Some(_) = self.flakes.insert(name, flake) {
-            // TODO: warning
+            // TODO: error
         };
     }
 
     fn enable_flake(&mut self, name: String) {
-        // TODO: warning if already true
-        self.flakes.get_mut(&name).unwrap().enabled = true;
+        let flake = self.flakes.get_mut(&name).unwrap();
+
+        if flake.enabled {
+            let msg = format!("flake `{}` is already enabled", name);
+            warn(&msg, self.stderr_style);
+        }
+
+        flake.enabled = true;
     }
 
     fn disable_flake(&mut self, name: String) {
-        // TODO: warning if already false
-        self.flakes.get_mut(&name).unwrap().enabled = false;
+        let flake = self.flakes.get_mut(&name).unwrap();
+
+        if flake.enabled {
+            let msg = format!("flake `{}` is already disabled", name);
+            warn(&msg, self.stderr_style);
+        }
+
+        flake.enabled = true;
     }
 
     fn remove_flake(&mut self, name: String) {
-        if let Some(_) = self.flakes.remove(&name) {
-            // TODO: warning
+        if self.flakes.remove(&name).is_none() {
+            let msg = format!("flake `{}` does not exists", name);
+            warn(&msg, self.stderr_style);
         }
     }
 
@@ -280,10 +320,10 @@ enum Commands {
 #[derive(Args)]
 #[group(multiple = false)]
 struct ListFilter {
-    /// Only list enabled flakes
+    /// Only list enabled flakes.
     #[arg(short, long)]
     enabled: bool,
-    /// Only list disabled flakes
+    /// Only list disabled flakes.
     #[arg(short, long)]
     disabled: bool,
 }
@@ -302,7 +342,7 @@ fn main() {
         project_dir.config_local_dir().to_owned()
     };
 
-    let mut interface = Interface::new(config_path.into(), cli.style);
+    let mut interface = Interface::new(config_path, cli.style);
     match cli.commands {
         Commands::Add { name, path } => interface.add_flake(name, path),
         Commands::Enable { name } => interface.enable_flake(name),
