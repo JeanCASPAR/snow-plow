@@ -1,10 +1,12 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
-    fmt,
+    error::Error as ErrorTrait,
+    fmt::{self},
     fs::{DirBuilder, File},
-    io::{self, IsTerminal},
+    io::{self, BufRead, IsTerminal},
     path::{self, Path, PathBuf},
+    process::{exit, Command},
 };
 
 use ansi_term::{ANSIGenericString, Colour, Style};
@@ -62,30 +64,285 @@ struct Interface {
     stderr_style: bool,
 }
 
-/// Checks that a given path contains a valid nix flake by running
-/// `nix flake show` and checking the exit code.
-fn check_flake(path: &Path) {
-    let output = std::process::Command::new("nix")
-        .arg("flake")
-        .arg("show")
-        .arg(path)
-        .output()
-        .unwrap();
-    if !output.status.success() {
-        panic!()
+enum Error {
+    Io(io::Error, String),
+    Nix(String),
+    NoConfig,
+    TrackedFlake(String),
+    MissingFlake(String),
+    Internal(Box<dyn ErrorTrait>),
+}
+
+impl Error {
+    fn msg(&self) -> String {
+        match self {
+            Error::Io(e, namespace) => format!("{}: {}", namespace, e),
+            Error::Nix(err) => format!("nix: {}", err),
+            Error::NoConfig => {
+                "no user provided configuration and unable to find the system default location"
+                    .to_owned()
+            }
+            Error::TrackedFlake(name) => format!("flake `{}` is already tracked", name),
+            Error::MissingFlake(name) => format!("flake `{}` is not tracked", name),
+            Error::Internal(e) => format!("internal: {}", e),
+        }
     }
 }
 
-/// Update the flake at the given path by running `nix flake update`.
-fn update_flake(path: &Path) {
-    let output = std::process::Command::new("nix")
-        .arg("flake")
-        .arg("update")
-        .arg(path)
-        .output()
-        .unwrap();
-    if !output.status.success() {
-        panic!()
+/// Public interface
+impl Interface {
+    /// Create a new `Interface`. It reads the configuration from `config_dir/CONFIG_FILE`,
+    /// and creates it if necessary.
+    fn new(config_dir: PathBuf, stdout_style: bool, stderr_style: bool) -> Self {
+        let flakes = HashMap::new();
+
+        let mut config_path = config_dir.to_owned();
+        config_path.push(CONFIG_FILE);
+
+        let mut this = Interface {
+            config_path,
+            flakes,
+            stdout_style,
+            stderr_style,
+        };
+
+        if let Err(e) = this.init(config_dir) {
+            Self::handle_errors(e, true, this.stderr_style);
+        }
+
+        this
+    }
+
+    fn add_flake(&mut self, name: String, path: PathBuf) -> Result<(), Vec<Error>> {
+        if self.flakes.contains_key(&name) {
+            return Err(vec![Error::TrackedFlake(name)]);
+        }
+        self.check_flake(&path)?;
+        let flake = Flake {
+            path: path::absolute(&path)
+                .map_err(|e| vec![Error::Io(e, path.display().to_string())])?,
+            enabled: true,
+        };
+        self.flakes.insert(name, flake);
+
+        Ok(())
+    }
+
+    fn enable_flake(&mut self, name: String) -> Result<(), Vec<Error>> {
+        let flake = self.get_flake_mut(&name)?;
+
+        let should_warn = flake.enabled;
+        flake.enabled = true;
+
+        if should_warn {
+            let msg = format!("flake `{}` is already enabled", name);
+            warn(&msg, self.stderr_style);
+        }
+
+        Ok(())
+    }
+
+    fn disable_flake(&mut self, name: String) -> Result<(), Vec<Error>> {
+        let flake = self.get_flake_mut(&name)?;
+
+        let should_warn = !flake.enabled;
+        flake.enabled = false;
+
+        if should_warn {
+            let msg = format!("flake `{}` is already disabled", name);
+            warn(&msg, self.stderr_style);
+        }
+
+        Ok(())
+    }
+
+    fn remove_flake(&mut self, name: String) -> Result<(), Vec<Error>> {
+        if self.flakes.remove(&name).is_none() {
+            let msg = format!("flake `{}` does not exists", name);
+            warn(&msg, self.stderr_style);
+        }
+
+        Ok(())
+    }
+
+    fn update_flakes(&self) -> Result<(), Vec<Error>> {
+        let nb = self
+            .flakes
+            .iter()
+            .filter(|(_, flake)| flake.enabled)
+            .count();
+        for (i, (name, flake)) in self.flakes.iter().enumerate() {
+            if flake.enabled {
+                println!(
+                    "updating flake `{}` at \"{}\" {}/{}",
+                    name,
+                    flake.path.display(),
+                    i,
+                    nb,
+                );
+                if let Err(errors) = self.update_flake(&flake.path) {
+                    // We do not exit because some flake may fail to be updated while another do not.
+                    Self::handle_errors(errors, false, self.stderr_style);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn list_flakes(&self, filter: ListFilter) -> Result<(), Vec<Error>> {
+        let some_filter = filter.enabled || filter.disabled;
+        for (name, flake) in self.flakes.iter() {
+            let selected = !some_filter
+                || (filter.enabled && flake.enabled)
+                || (filter.disabled && !flake.enabled);
+            if selected {
+                let info = if !some_filter {
+                    if flake.enabled {
+                        " enabled"
+                    } else {
+                        " disabled"
+                    }
+                } else {
+                    ""
+                };
+                println!(
+                    "{} {}{}",
+                    apply_style(Style::new().bold(), name, self.stdout_style),
+                    flake.path.display(),
+                    info,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn info_flake(&self, name: String) -> Result<(), Vec<Error>> {
+        let flake = self.get_flake(&name)?;
+        println!(
+            "{} {} {}",
+            apply_style(Style::new().bold(), &name, self.stdout_style),
+            flake.path.display(),
+            if flake.enabled { "enabled" } else { "disabled" }
+        );
+        Ok(())
+    }
+}
+
+/// Private functions
+impl Interface {
+    /// Wrap a Command and build error messages
+    fn perform(&self, cmd: &mut Command) -> Result<(), Vec<Error>> {
+        let output = cmd
+            .output()
+            .map_err(|e| vec![Error::Io(e, "shell".into())])?;
+        if !output.status.success() {
+            let mut v = Vec::new();
+            for line in output.stderr.lines() {
+                let line = line.map_err(|e| vec![Error::Io(e, "nix".into())])?;
+                if let Some(s) = line.strip_prefix("error:") {
+                    v.push(Error::Nix(s.trim().to_owned()));
+                } else if let Some(s) = line.strip_prefix("warning:") {
+                    warn(&format!("nix: {}", s.trim()), self.stderr_style);
+                } else {
+                    warn(&format!("nix: {}", line.trim()), self.stderr_style);
+                }
+            }
+            return Err(v);
+        }
+        Ok(())
+    }
+
+    /// Checks that a given path contains a valid nix flake by running
+    /// `nix flake show` and checking the exit code.
+    fn check_flake(&self, path: &Path) -> Result<(), Vec<Error>> {
+        let mut cmd = Command::new("nix");
+        self.perform(cmd.arg("flake").arg("show").arg(path))
+    }
+
+    /// Update the flake at the given path by running `nix flake update`.
+    fn update_flake(&self, path: &Path) -> Result<(), Vec<Error>> {
+        let mut cmd = Command::new("nix");
+        self.perform(cmd.arg("flake").arg("update").arg(path))
+    }
+
+    /// Return a shared reference to a tracked flake, if it exists, and an error otherwise.
+    fn get_flake(&self, name: &str) -> Result<&Flake, Vec<Error>> {
+        self.flakes
+            .get(name)
+            .ok_or_else(|| vec![Error::MissingFlake(name.to_owned())])
+    }
+
+    /// Return a mutable reference to a tracked flake, if it exists, and an error otherwise.
+    fn get_flake_mut(&mut self, name: &str) -> Result<&mut Flake, Vec<Error>> {
+        self.flakes
+            .get_mut(name)
+            .ok_or_else(|| vec![Error::MissingFlake(name.to_owned())])
+    }
+
+    /// Return a tuple (stdout_style, stderr_style), allowing to decide if stdout (respectively stderr)
+    /// outputs shoud be formatted with ANSI escape code.
+    fn style(style: ColorChoice) -> (bool, bool) {
+        match style {
+            ColorChoice::Auto => (io::stdout().is_terminal(), io::stderr().is_terminal()),
+            ColorChoice::Always => (true, true),
+            ColorChoice::Never => (false, false),
+        }
+    }
+
+    /// The fallible part of the constructor.
+    fn init(&mut self, config_dir: PathBuf) -> Result<(), Vec<Error>> {
+        if !self.config_path.exists() {
+            DirBuilder::new()
+                .recursive(true)
+                .create(&config_dir)
+                .and_then(|()| File::create_new(&self.config_path))
+                .map_err(|e| vec![Error::Io(e, config_dir.display().to_string())])?;
+        }
+
+        let file = File::open(&self.config_path)
+            .map_err(|e| vec![Error::Io(e, config_dir.display().to_string())])?;
+        let mut reader = csv::Reader::from_reader(file);
+        for result in reader.deserialize() {
+            let named_flake: NamedFlake = result.map_err(|e| vec![Error::Internal(Box::new(e))])?;
+            let (name, flake) = named_flake.into();
+            if let Some(old_flake) = self.flakes.insert(name.clone(), flake) {
+                let msg = format!(
+                    "flake `{}` is present several time in the file. \"{}\" has been removed.",
+                    name,
+                    old_flake.path.display(),
+                );
+                warn(&msg, self.stderr_style);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Print errors, and exit properly if asked.
+    fn handle_errors(errors: Vec<Error>, should_exit: bool, stderr_style: bool) {
+        for err in errors {
+            error(&err.msg(), stderr_style);
+            if should_exit {
+                let error_code = match err {
+                    Error::Io(e, _) => e.kind() as i32,
+                    _ => 1,
+                };
+                exit(error_code);
+            }
+        }
+    }
+}
+
+/// Overwrite the configuration file and save the new configuration.
+impl Drop for Interface {
+    fn drop(&mut self) {
+        // TODO: error handling here, do not delete the configuration if there is an error here
+        let file = File::create(&self.config_path).unwrap();
+        let mut writer = csv::Writer::from_writer(file);
+        for (name, flake) in &self.flakes {
+            let named_flake = NamedFlake::from((name.clone(), flake.clone()));
+            writer.serialize(named_flake).unwrap()
+        }
     }
 }
 
@@ -104,12 +361,12 @@ where
     }
 }
 
-/// Log a message on stderr
+/// Log a message on stderr.
 fn log(msg: &str, level: &str) {
-    eprintln!("{}: snow-plow: {}", level, msg);
+    eprintln!("snow-plow: {}: {}", level, msg);
 }
 
-/// Raise a warning
+/// Raise a warning.
 fn warn(msg: &str, stderr_style: bool) {
     let level = apply_style(
         Style::new().bold().fg(Colour::Yellow),
@@ -120,153 +377,10 @@ fn warn(msg: &str, stderr_style: bool) {
     log(msg, &level);
 }
 
-/// Raise an error
+/// Raise an error.
 fn error(msg: &str, stderr_style: bool) {
     let level = apply_style(Style::new().bold().fg(Colour::Red), "error", stderr_style).to_string();
     log(msg, &level);
-}
-
-impl Interface {
-    /// Create a new `Interface`, reading the configuration from `config_dir/CONFIG_FILE`,
-    /// creating it if necessary.
-    fn new(config_dir: PathBuf, style: ColorChoice) -> Self {
-        let mut flakes = HashMap::new();
-
-        let (stdout_style, stderr_style) = match style {
-            ColorChoice::Auto => (io::stdout().is_terminal(), io::stderr().is_terminal()),
-            ColorChoice::Always => (true, true),
-            ColorChoice::Never => (false, false),
-        };
-
-        let mut config_path = config_dir.clone();
-        config_path.push(CONFIG_FILE);
-        if !config_path.exists() {
-            DirBuilder::new()
-                .recursive(true)
-                .create(config_dir)
-                .unwrap();
-            File::create_new(&config_path).unwrap();
-        }
-
-        let file = File::open(&config_path).unwrap();
-        let mut reader = csv::Reader::from_reader(file);
-        for result in reader.deserialize() {
-            let named_flake: NamedFlake = result.unwrap();
-            let (name, flake) = named_flake.into();
-            if let Some(old_flake) = flakes.insert(name.clone(), flake) {
-                let msg = format!(
-                    "flake `{}` is present several time in the file. \"{}\" has been removed.",
-                    name,
-                    old_flake.path.display(),
-                );
-                warn(&msg, stderr_style);
-            }
-        }
-
-        Self {
-            config_path,
-            flakes,
-            stdout_style,
-            stderr_style,
-        }
-    }
-
-    fn add_flake(&mut self, name: String, path: PathBuf) {
-        check_flake(&path);
-        let flake = Flake {
-            path: path::absolute(path).unwrap(),
-            enabled: true,
-        };
-        if let Some(_) = self.flakes.insert(name, flake) {
-            // TODO: error
-        };
-    }
-
-    fn enable_flake(&mut self, name: String) {
-        let flake = self.flakes.get_mut(&name).unwrap();
-
-        if flake.enabled {
-            let msg = format!("flake `{}` is already enabled", name);
-            warn(&msg, self.stderr_style);
-        }
-
-        flake.enabled = true;
-    }
-
-    fn disable_flake(&mut self, name: String) {
-        let flake = self.flakes.get_mut(&name).unwrap();
-
-        if flake.enabled {
-            let msg = format!("flake `{}` is already disabled", name);
-            warn(&msg, self.stderr_style);
-        }
-
-        flake.enabled = false;
-        Ok(())
-    }
-
-    fn remove_flake(&mut self, name: String) {
-        if self.flakes.remove(&name).is_none() {
-            let msg = format!("flake `{}` does not exists", name);
-            warn(&msg, self.stderr_style);
-        }
-    }
-
-    fn update_flakes(&self) {
-        for (_, flake) in self.flakes.iter() {
-            if flake.enabled {
-                update_flake(&flake.path)
-            }
-        }
-    }
-
-    fn list_flakes(&self, filter: ListFilter) {
-        let some_filter = filter.enabled || filter.disabled;
-        for (name, flake) in self.flakes.iter() {
-            let selected = !some_filter
-                || (filter.enabled && flake.enabled)
-                || (filter.disabled && !flake.enabled);
-            if selected {
-                let info = if !some_filter {
-                    if flake.enabled {
-                        "enabled"
-                    } else {
-                        "disabled"
-                    }
-                } else {
-                    ""
-                };
-                println!(
-                    "{} {}{}",
-                    apply_style(Style::new().bold(), name, self.stdout_style),
-                    flake.path.display(),
-                    info,
-                );
-            }
-        }
-    }
-
-    fn info_flake(&self, name: String) {
-        let flake = self.flakes.get(&name).unwrap();
-        println!(
-            "{} {} {}",
-            apply_style(Style::new().bold(), &name, self.stdout_style),
-            flake.path.display(),
-            if flake.enabled { "enabled" } else { "disabled" }
-        );
-    }
-}
-
-/// Overwrite the configuration file and save the new configuration.
-impl Drop for Interface {
-    fn drop(&mut self) {
-        let file = File::create(&self.config_path).unwrap();
-        let mut writer = csv::Writer::from_writer(file);
-        for (name, flake) in &self.flakes {
-            let named_flake = NamedFlake::from((name.clone(), flake.clone()));
-            writer.serialize(named_flake).unwrap()
-        }
-    }
 }
 
 /// The command-line interface parser.
@@ -336,15 +450,23 @@ fn main() {
     use clap::CommandFactory;
     Cli::command().debug_assert();
 
+    let (stdout_style, stderr_style) = Interface::style(cli.style);
+
     let config_path = if let Some(config_path) = cli.config {
         config_path
     } else {
-        let project_dir = ProjectDirs::from("", "", "snow-plow").unwrap();
-        project_dir.config_local_dir().to_owned()
+        match ProjectDirs::from("", "", "snow-plow").ok_or_else(|| vec![Error::NoConfig]) {
+            Ok(project_dir) => project_dir.config_local_dir().to_owned(),
+            Err(errors) => {
+                Interface::handle_errors(errors, true, stderr_style);
+                unreachable!();
+            }
+        }
     };
 
-    let mut interface = Interface::new(config_path, cli.style);
-    match cli.commands {
+    let mut interface = Interface::new(config_path, stdout_style, stderr_style);
+
+    let res = match cli.commands {
         Commands::Add { name, path } => interface.add_flake(name, path),
         Commands::Enable { name } => interface.enable_flake(name),
         Commands::Disable { name } => interface.disable_flake(name),
@@ -352,5 +474,8 @@ fn main() {
         Commands::Update => interface.update_flakes(),
         Commands::List { filter } => interface.list_flakes(filter),
         Commands::Info { name } => interface.info_flake(name),
+    };
+    if let Err(errors) = res {
+        Interface::handle_errors(errors, true, interface.stderr_style);
     }
 }
