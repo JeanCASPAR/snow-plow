@@ -140,7 +140,7 @@ impl Interface {
 
         let mut config_path = config_dir.clone();
         config_path.push(CONFIG_FILE);
-        if !config_dir.exists() {
+        if !config_path.exists() {
             DirBuilder::new()
                 .recursive(true)
                 .create(config_dir)
@@ -201,7 +201,8 @@ impl Interface {
             warn(&msg, self.stderr_style);
         }
 
-        flake.enabled = true;
+        flake.enabled = false;
+        Ok(())
     }
 
     fn remove_flake(&mut self, name: String) {
