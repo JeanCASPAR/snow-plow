@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    collections::HashMap,
     env, fmt,
     fs::{DirBuilder, File},
     io::{self, IsTerminal},
@@ -14,15 +15,41 @@ use serde::{Deserialize, Serialize};
 const CONFIG_FILE: &'static str = "config.csv";
 
 #[derive(Serialize, Deserialize)]
-struct Flake {
+struct NamedFlake {
     name: String,
+    path: PathBuf,
+    enabled: bool,
+}
+
+impl Into<(String, Flake)> for NamedFlake {
+    fn into(self) -> (String, Flake) {
+        let flake = Flake {
+            path: self.path,
+            enabled: self.enabled,
+        };
+        (self.name, flake)
+    }
+}
+
+impl From<(String, Flake)> for NamedFlake {
+    fn from((name, flake): (String, Flake)) -> Self {
+        NamedFlake {
+            name,
+            path: flake.path,
+            enabled: flake.enabled,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Flake {
     path: PathBuf,
     enabled: bool,
 }
 
 struct Interface {
     path: PathBuf,
-    flakes: Vec<Flake>,
+    flakes: HashMap<String, Flake>,
     stdout_color: bool,
     stderr_color: bool,
 }
@@ -68,7 +95,7 @@ where
 // disable : keep in the list, but doesn't update
 impl Interface {
     fn new(mut path: PathBuf, color: ColorChoice) -> Self {
-        let mut flakes = Vec::new();
+        let mut flakes = HashMap::new();
 
         path.push(CONFIG_FILE);
         if !path.exists() {
@@ -84,8 +111,11 @@ impl Interface {
         let file = File::open(&path).unwrap();
         let mut reader = csv::Reader::from_reader(file);
         for result in reader.deserialize() {
-            let flake = result.unwrap();
-            flakes.push(flake);
+            let named_flake: NamedFlake = result.unwrap();
+            let (name, flake) = named_flake.into();
+            if let Some(_) = flakes.insert(name, flake) {
+                // TODO: warning
+            }
         }
 
         let (stdout_color, stderr_color) = match color {
@@ -102,47 +132,32 @@ impl Interface {
         }
     }
 
-    fn get_flake_mut(&mut self, name: &str) -> Option<&mut Flake> {
-        self.flakes.iter_mut().find(|flake| flake.name == name)
-    }
-
     fn add_flake(&mut self, name: String, path: PathBuf) {
         check_flake(&path);
         let flake = Flake {
-            name,
             path: path.canonicalize().unwrap(),
             enabled: true,
         };
-        self.flakes.push(flake);
+        self.flakes.insert(name, flake);
     }
 
     fn enable_flake(&mut self, name: String) {
         // TODO: warning if already true
-        self.get_flake_mut(&name).unwrap().enabled = true;
+        self.flakes.get_mut(&name).unwrap().enabled = true;
     }
 
     fn disable_flake(&mut self, name: String) {
-        self.get_flake_mut(&name).unwrap().enabled = false;
+        self.flakes.get_mut(&name).unwrap().enabled = false;
     }
 
     fn remove_flake(&mut self, name: String) {
-        let mut idx = None;
-        for (i, flake) in self.flakes.iter().enumerate() {
-            if flake.name == name {
-                idx = Some(i);
-                break;
-            }
-        }
-        match idx {
-            Some(i) => {
-                self.flakes.swap_remove(i);
-            }
-            None => (), // TODO: warning
+        if let Some(_) = self.flakes.remove(&name) {
+            // TODO: warning
         }
     }
 
     fn update_flakes(&self) {
-        for flake in &self.flakes {
+        for (_, flake) in self.flakes.iter() {
             if flake.enabled {
                 update_flake(&flake.path)
             }
@@ -151,14 +166,14 @@ impl Interface {
 
     fn list_flakes(&self, filter: ListFilter) {
         let some_filter = filter.enabled || filter.disabled;
-        for flake in &self.flakes {
+        for (name, flake) in self.flakes.iter() {
             let selected = !some_filter
                 || (filter.enabled && flake.enabled)
                 || (filter.disabled && !flake.enabled);
             if selected {
                 let line = format!(
                     "{} {}",
-                    apply_style(Style::new().bold(), &flake.name, self.stdout_color),
+                    apply_style(Style::new().bold(), name, self.stdout_color),
                     flake.path.display(),
                 );
                 if !some_filter {
@@ -175,14 +190,10 @@ impl Interface {
     }
 
     fn info_flake(&self, name: String) {
-        let flake = self
-            .flakes
-            .iter()
-            .find(|flake| &flake.name == &name)
-            .unwrap();
+        let flake = self.flakes.get(&name).unwrap();
         println!(
             "{} {} {}",
-            apply_style(Style::new().bold(), &flake.name, self.stdout_color),
+            apply_style(Style::new().bold(), &name, self.stdout_color),
             flake.path.display(),
             if flake.enabled { "enabled" } else { "disabled" }
         );
@@ -193,8 +204,9 @@ impl Drop for Interface {
     fn drop(&mut self) {
         let file = File::create(&self.path).unwrap();
         let mut writer = csv::Writer::from_writer(file);
-        for flake in &self.flakes {
-            writer.serialize(flake).unwrap()
+        for (name, flake) in &self.flakes {
+            let named_flake = NamedFlake::from((name.clone(), flake.clone()));
+            writer.serialize(named_flake).unwrap()
         }
     }
 }
