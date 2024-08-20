@@ -1,4 +1,6 @@
-//! TODO
+//! Snow Plow is an utility which allows to update several flakes with one
+//! command, in order to improve sharing of dependencies on your computer.
+//! Snow Plow is licensed under the [MIT license][mit-url].
 
 use std::{
     borrow::Cow,
@@ -371,7 +373,7 @@ impl Interface {
     }
 
     /// Save the data and exits properly. It should never return Ok(()).
-    /// TODO: When https://github.com/rust-lang/rust/issues/35121 is stabilize, we can replace () by !
+    /// TODO: When https://github.com/rust-lang/rust/issues/35121 is stabilized, we can replace () by !
     fn clean(&mut self) -> Result<(), Vec<Error>> {
         let tmp_path = self.config_path.with_extension("tmp");
         let file = File::create(&tmp_path)
