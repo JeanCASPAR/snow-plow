@@ -4,11 +4,11 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     error::Error as ErrorTrait,
-    fmt::{self},
-    fs::{DirBuilder, File},
-    io::{self, BufRead, IsTerminal},
+    fmt,
+    fs::{self, DirBuilder, File},
+    io::{self, BufRead, Error as IoError, IsTerminal},
     path::{self, Path, PathBuf},
-    process::{exit, Command},
+    process::{self, Command},
 };
 
 use ansi_term::{ANSIGenericString, Colour, Style};
@@ -64,11 +64,13 @@ struct Interface {
     stdout_style: bool,
     /// Control wether ANSI escape code are used or not to format the ouput.
     stderr_style: bool,
+    /// Record wether the data has been properly saved.
+    cleaned: bool,
 }
 
 enum Error {
     /// IO errors, and the file in which it occurs.
-    Io(io::Error, String),
+    Io(IoError, String),
     /// Errors reported by nix.
     Nix(Vec<String>),
     /// When no configuration directory was found.
@@ -87,8 +89,7 @@ impl Error {
             Error::Io(e, file) => format!("{}: {}", file, e),
             Error::Nix(errors) => {
                 let mut errors = errors.iter();
-                let Some(mut s) = errors.next().cloned()
-                else {
+                let Some(mut s) = errors.next().cloned() else {
                     return String::new();
                 };
 
@@ -97,7 +98,7 @@ impl Error {
                     s.push_str(e);
                 }
                 s
-            },
+            }
             Error::NoConfig => {
                 "no user provided configuration and unable to find the system default location"
                     .to_owned()
@@ -124,6 +125,7 @@ impl Interface {
             flakes,
             stdout_style,
             stderr_style,
+            cleaned: false,
         };
 
         if let Err(e) = this.init(config_dir) {
@@ -363,21 +365,41 @@ impl Interface {
                     Error::Io(e, _) => e.kind() as i32,
                     _ => 1,
                 };
-                exit(error_code);
+                process::exit(error_code);
             }
         }
     }
-}
 
-/// Overwrite the configuration file and save the new configuration.
-impl Drop for Interface {
-    fn drop(&mut self) {
-        // TODO: error handling here, do not delete the configuration if there is an error here
-        let file = File::create(&self.config_path).unwrap();
+    /// Save the data and exits properly. It should never return Ok(()).
+    /// TODO: When https://github.com/rust-lang/rust/issues/35121 is stabilize, we can replace () by !
+    fn clean(&mut self) -> Result<(), Vec<Error>> {
+        let tmp_path = self.config_path.with_extension("tmp");
+        let file = File::create(&tmp_path)
+            .map_err(|e| vec![Error::Io(e, tmp_path.display().to_string())])?;
         let mut writer = csv::Writer::from_writer(file);
         for (name, flake) in &self.flakes {
             let named_flake = NamedFlake::from((name.clone(), flake.clone()));
-            writer.serialize(named_flake).unwrap()
+            writer
+                .serialize(named_flake)
+                .map_err(|e| vec![Error::Internal(Box::new(e))])?;
+        }
+        fs::rename(&tmp_path, &self.config_path)
+            .map_err(|e| vec![Error::Io(e, tmp_path.display().to_string())])?;
+        self.cleaned = true;
+        Ok(())
+    }
+}
+
+/// Exit with an error if the Interface has not been cleaned properly.
+impl Drop for Interface {
+    fn drop(&mut self) {
+        if !self.cleaned {
+            Self::handle_errors(
+                vec![Error::Internal(format!("unexpected exit").into())],
+                true,
+                self.stderr_style,
+            );
+            process::exit(1);
         }
     }
 }
@@ -511,6 +533,7 @@ fn main() {
         Commands::List { filter } => interface.list_flakes(filter),
         Commands::Info { name } => interface.info_flake(name),
     };
+    let res = res.and_then(|()| interface.clean());
     if let Err(errors) = res {
         Interface::handle_errors(errors, true, interface.stderr_style);
     }
