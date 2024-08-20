@@ -1,3 +1,5 @@
+//! TODO
+
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -46,7 +48,7 @@ impl From<(String, Flake)> for NamedFlake {
 
 /// Represents a flake managed by SnowPlow.
 /// If it is not enabled, it will not be updated.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 struct Flake {
     /// The absolute path of the flake directory.
     path: PathBuf,
@@ -65,19 +67,37 @@ struct Interface {
 }
 
 enum Error {
+    /// IO errors, and the file in which it occurs.
     Io(io::Error, String),
-    Nix(String),
+    /// Errors reported by nix.
+    Nix(Vec<String>),
+    /// When no configuration directory was found.
     NoConfig,
+    /// When adding a flake when there is already a tracked flake with the same name.  
     TrackedFlake(String),
+    /// When removing a flake that is not tracked.
     MissingFlake(String),
+    /// An internal error occured.
     Internal(Box<dyn ErrorTrait>),
 }
 
 impl Error {
     fn msg(&self) -> String {
         match self {
-            Error::Io(e, namespace) => format!("{}: {}", namespace, e),
-            Error::Nix(err) => format!("nix: {}", err),
+            Error::Io(e, file) => format!("{}: {}", file, e),
+            Error::Nix(errors) => {
+                let mut errors = errors.iter();
+                let Some(mut s) = errors.next().cloned()
+                else {
+                    return String::new();
+                };
+
+                for e in errors {
+                    s.push_str("\n");
+                    s.push_str(e);
+                }
+                s
+            },
             Error::NoConfig => {
                 "no user provided configuration and unable to find the system default location"
                     .to_owned()
@@ -237,16 +257,32 @@ impl Interface {
             .map_err(|e| vec![Error::Io(e, "shell".into())])?;
         if !output.status.success() {
             let mut v = Vec::new();
+            // append every line following an `error:` to the current error,
+            // until another error or warning starts
+            let mut current_error = None;
+            let mut push_error = |error: &mut Option<Vec<String>>| {
+                if let Some(err) = error.take() {
+                    v.push(Error::Nix(err));
+                }
+            };
             for line in output.stderr.lines() {
                 let line = line.map_err(|e| vec![Error::Io(e, "nix".into())])?;
-                if let Some(s) = line.strip_prefix("error:") {
-                    v.push(Error::Nix(s.trim().to_owned()));
-                } else if let Some(s) = line.strip_prefix("warning:") {
-                    warn(&format!("nix: {}", s.trim()), self.stderr_style);
-                } else {
+                if line.starts_with("error:") {
+                    push_error(&mut current_error);
+                    current_error = Some(vec![line.trim().to_owned()]);
+                } else if line.starts_with("warning:") {
+                    push_error(&mut current_error);
                     warn(&format!("nix: {}", line.trim()), self.stderr_style);
+                } else {
+                    match current_error.as_mut() {
+                        Some(err) => {
+                            err.push(line.trim().to_owned());
+                        }
+                        None => warn(&format!("nix: {}", line.trim()), self.stderr_style),
+                    }
                 }
             }
+            push_error(&mut current_error);
             return Err(v);
         }
         Ok(())
