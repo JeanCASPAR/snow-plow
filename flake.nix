@@ -30,6 +30,22 @@
         defaultPackage = naerskLib.buildPackage {
           pname = "snow-plow";
           root = ./.;
+          nativeBuildInputs = [ pkgs.installShellFiles ];
+          # man files and shell completions
+          postInstall = ''
+            mkdir $out/artifacts
+            cd $out/artifacts
+
+            $out/bin/snow-plow gen-man
+            installManPage ./*.1
+
+            cd $out/share
+            rm -r $out/artifacts
+
+            $out/bin/snow-plow gen-completion bash
+            $out/bin/snow-plow gen-completion fish
+            $out/bin/snow-plow gen-completion zsh
+          '';
         };
         defaultApp = utils.lib.mkApp {
           drv = self.defaultPackage.${system};
@@ -38,7 +54,6 @@
           packages = [
             rust
             cargo
-            cargo-edit
             rustfmt
             rustPackages.clippy
             rust-analyzer

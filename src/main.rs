@@ -5,6 +5,7 @@
 use std::{
     borrow::Cow,
     collections::HashMap,
+    env,
     error::Error as ErrorTrait,
     fmt,
     fs::{self, DirBuilder, File},
@@ -14,7 +15,9 @@ use std::{
 };
 
 use ansi_term::{ANSIGenericString, Colour, Style};
-use clap::{Args, ColorChoice, Parser, Subcommand};
+use clap::{Args, ColorChoice, Command as ClapCommand, CommandFactory, Parser, Subcommand};
+use clap_complete::{generate_to, Shell};
+use clap_mangen::Man;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
@@ -250,6 +253,60 @@ impl Interface {
         );
         Ok(())
     }
+
+    fn generate_completion(shell: Shell) -> Result<(), Vec<Error>> {
+        let mut cmd = Cli::command();
+        let out_dir = env::current_dir().map_err(|e| vec![Error::Io(e, "current directory".to_owned())])?;
+
+        generate_to(shell, &mut cmd, "snow-plow", &out_dir).map_err(|e| vec![Error::Io(e, out_dir.display().to_string())])?;
+
+        Ok(())
+    }
+
+    fn generate_man() -> Result<(), Vec<Error>> {
+        let cmd = Cli::command();
+        let out_dir = env::current_dir().map_err(|e| vec![Error::Io(e, "current directory".to_owned())])?;
+
+        Self::generate_man_cmd(cmd.clone(), false, &out_dir)?;
+        for subcmd in cmd.get_subcommands() {
+            Self::generate_man_cmd(subcmd.clone(), true, &out_dir)?;
+        }
+
+        Ok(())
+    }
+
+    /// Print errors, and exit properly if asked.
+    fn handle_errors(errors: Vec<Error>, should_exit: bool, stderr_style: bool) {
+        for err in errors {
+            error(&err.msg(), stderr_style);
+            if should_exit {
+                let error_code = match err {
+                    Error::Io(e, _) => e.kind() as i32,
+                    _ => 1,
+                };
+                process::exit(error_code);
+            }
+        }
+    }
+
+    /// Save the data and exits properly. It should never return Ok(()).
+    fn clean(&mut self) -> Result<(), Vec<Error>> {
+        // TODO: When <https://github.com/rust-lang/rust/issues/35121> is stabilized, we can replace () by !
+        let tmp_path = self.config_path.with_extension("tmp");
+        let file = File::create(&tmp_path)
+            .map_err(|e| vec![Error::Io(e, tmp_path.display().to_string())])?;
+        let mut writer = csv::Writer::from_writer(file);
+        for (name, flake) in &self.flakes {
+            let named_flake = NamedFlake::from((name.clone(), flake.clone()));
+            writer
+                .serialize(named_flake)
+                .map_err(|e| vec![Error::Internal(Box::new(e))])?;
+        }
+        fs::rename(&tmp_path, &self.config_path)
+            .map_err(|e| vec![Error::Io(e, tmp_path.display().to_string())])?;
+        self.cleaned = true;
+        Ok(())
+    }
 }
 
 /// Private functions
@@ -358,36 +415,25 @@ impl Interface {
         Ok(())
     }
 
-    /// Print errors, and exit properly if asked.
-    fn handle_errors(errors: Vec<Error>, should_exit: bool, stderr_style: bool) {
-        for err in errors {
-            error(&err.msg(), stderr_style);
-            if should_exit {
-                let error_code = match err {
-                    Error::Io(e, _) => e.kind() as i32,
-                    _ => 1,
-                };
-                process::exit(error_code);
-            }
-        }
-    }
+    /// Generate the man page for the given Command.
+    fn generate_man_cmd(
+        cmd: ClapCommand,
+        subcommand: bool,
+        out_dir: &Path,
+    ) -> Result<(), Vec<Error>> {
+        let name = if subcommand {
+            format!("snow-plow-{}", cmd.get_name())
+        } else {
+            "snow-plow".to_owned()
+        };
 
-    /// Save the data and exits properly. It should never return Ok(()).
-    /// TODO: When https://github.com/rust-lang/rust/issues/35121 is stabilized, we can replace () by !
-    fn clean(&mut self) -> Result<(), Vec<Error>> {
-        let tmp_path = self.config_path.with_extension("tmp");
-        let file = File::create(&tmp_path)
-            .map_err(|e| vec![Error::Io(e, tmp_path.display().to_string())])?;
-        let mut writer = csv::Writer::from_writer(file);
-        for (name, flake) in &self.flakes {
-            let named_flake = NamedFlake::from((name.clone(), flake.clone()));
-            writer
-                .serialize(named_flake)
-                .map_err(|e| vec![Error::Internal(Box::new(e))])?;
-        }
-        fs::rename(&tmp_path, &self.config_path)
-            .map_err(|e| vec![Error::Io(e, tmp_path.display().to_string())])?;
-        self.cleaned = true;
+        let man = Man::new(cmd);
+        let man_path = out_dir.join(format!("{name}.1"));
+
+        let mut file = File::create(man_path).map_err(|e| vec![Error::Io(e, name.clone())])?;
+        man.render(&mut file)
+            .map_err(|e| vec![Error::Io(e, name.clone())])?;
+
         Ok(())
     }
 }
@@ -443,12 +489,12 @@ fn error(msg: &str, stderr_style: bool) {
     log(msg, &level);
 }
 
-/// The command-line interface parser.
+/// TODO: description
 #[derive(Parser)]
 #[command(version, about, long_about)]
-struct Cli {
+pub struct Cli {
     #[command(subcommand)]
-    commands: Commands,
+    pub commands: Commands,
     /// The directory SnowPlow will use for saving the tracked flakes.
     ///
     /// If it is not provided through the command line, it will be read from
@@ -456,15 +502,15 @@ struct Cli {
     /// SnowPlow will try the default locations for the system ($XDG_CONFIG_HOME/.config/snow-plow
     /// or $HOME/.config/snow-plow)
     #[arg(long, short, global = true, env = "SNOW_PLOW_CONFIG")]
-    config: Option<PathBuf>,
+    pub config: Option<PathBuf>,
     /// Control when the output should be formatted with ANSI escape code.
     #[arg(long, short, default_value = "auto", global = true)]
-    style: ColorChoice,
+    pub style: ColorChoice,
 }
 
 /// The different commands of SnowPlow.
 #[derive(Subcommand)]
-enum Commands {
+pub enum Commands {
     /// Allow a flake to be managed by SnowPlow. Although it is discouraged,
     /// several entries can point to the same flake.
     Add {
@@ -487,6 +533,10 @@ enum Commands {
         #[command(flatten)]
         filter: ListFilter,
     },
+    /// Generate completion for the given shell, in the current directory.
+    GenCompletion { shell: Shell },
+    /// Generate man pages, in the current directory.
+    GenMan,
     /// Show the path and status of a given flake.
     Info { name: String },
 }
@@ -494,13 +544,13 @@ enum Commands {
 /// Filters for the list commands.
 #[derive(Args)]
 #[group(multiple = false)]
-struct ListFilter {
+pub struct ListFilter {
     /// Only list enabled flakes.
     #[arg(short, long)]
-    enabled: bool,
+    pub enabled: bool,
     /// Only list disabled flakes.
     #[arg(short, long)]
-    disabled: bool,
+    pub disabled: bool,
 }
 
 fn main() {
@@ -511,6 +561,19 @@ fn main() {
     Cli::command().debug_assert();
 
     let (stdout_style, stderr_style) = Interface::style(cli.style);
+
+    let res = match cli.commands {
+        Commands::GenCompletion { shell } => Some(Interface::generate_completion(shell)),
+        Commands::GenMan => Some(Interface::generate_man()),
+        _ => None,
+    };
+
+    if let Some(res) = res {
+        if let Err(errors) = res {
+            Interface::handle_errors(errors, true, stderr_style);
+        }
+        return;
+    }
 
     let config_path = if let Some(config_path) = cli.config {
         config_path
@@ -533,6 +596,7 @@ fn main() {
         Commands::Remove { name } => interface.remove_flake(name),
         Commands::Update => interface.update_flakes(),
         Commands::List { filter } => interface.list_flakes(filter),
+        Commands::GenCompletion { .. } | Commands::GenMan => unreachable!(),
         Commands::Info { name } => interface.info_flake(name),
     };
     let res = res.and_then(|()| interface.clean());
