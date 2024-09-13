@@ -489,9 +489,17 @@ fn error(msg: &str, stderr_style: bool) {
     log(msg, &level);
 }
 
-/// TODO: description
+/// The Command-Line Interface.
 #[derive(Parser)]
-#[command(version, about, long_about)]
+#[command(
+    version, about, author,
+    help_template = "\
+{before-help}
+{name} ({version}) by {author}: {about-section}
+{usage-heading} {usage}
+
+{all-args}{after-help}"
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub commands: Commands,
