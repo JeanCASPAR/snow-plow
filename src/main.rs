@@ -195,7 +195,7 @@ impl Interface {
         Ok(())
     }
 
-    fn update_flakes(&self, name : Option<String>) -> Result<(), Vec<Error>> {
+    fn update_flakes(&self, name : Option<String>, args: Vec<String>) -> Result<(), Vec<Error>> {
         if let Some(name) = name {
             let Some((name, flake)) = self.flakes.iter().find(|(n, _)| *n == &name)
             else {
@@ -209,7 +209,7 @@ impl Interface {
                     name,
                     flake.path.display(),
                 );
-                if let Err(errors) = self.update_flake(&flake.path) {
+                if let Err(errors) = self.update_flake(&flake.path, &args) {
                     Self::handle_errors(errors, true, self.stderr_style);
                 }
             }
@@ -230,7 +230,7 @@ impl Interface {
                     i,
                     nb,
                 );
-                if let Err(errors) = self.update_flake(&flake.path) {
+                if let Err(errors) = self.update_flake(&flake.path, &args) {
                     // We do not exit because some flake may fail to be updated while another do not.
                     Self::handle_errors(errors, false, self.stderr_style);
                 }
@@ -381,9 +381,9 @@ impl Interface {
     }
 
     /// Update the flake at the given path by running `nix flake update`.
-    fn update_flake(&self, path: &Path) -> Result<(), Vec<Error>> {
+    fn update_flake(&self, path: &Path, args: &[String]) -> Result<(), Vec<Error>> {
         let mut cmd = Command::new("nix");
-        self.perform(cmd.arg("flake").arg("update").arg(path))
+        self.perform(cmd.arg("flake").arg("update").arg(path).args(args))
     }
 
     /// Return a shared reference to a tracked flake, if it exists, and an error otherwise.
@@ -559,7 +559,12 @@ pub enum Commands {
     /// Remove a flake from the list, so that SnowPlow doesn't manage it anymore.
     Remove { name: String },
     /// Update the specified flake if a name is given, or all enabled flakes at once if no name is given.
-    Update { name : Option<String> },
+    Update {
+        name: Option<String>,
+        /// Optional arguments to pass further to nix.
+        #[clap(last=true)]
+        args: Vec<String>
+    },
     /// List all tracked flakes, their path and status.
     List {
         #[command(flatten)]
@@ -626,7 +631,7 @@ fn main() {
         Commands::Enable { name } => interface.enable_flake(name),
         Commands::Disable { name } => interface.disable_flake(name),
         Commands::Remove { name } => interface.remove_flake(name),
-        Commands::Update { name } => interface.update_flakes(name),
+        Commands::Update { name, args } => interface.update_flakes(name, args),
         Commands::List { filter } => interface.list_flakes(filter),
         Commands::GenCompletion { .. } | Commands::GenMan => unreachable!(),
         Commands::Info { name } => interface.info_flake(name),
