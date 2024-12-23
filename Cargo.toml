@@ -9,6 +9,10 @@ readme = "README.md"
 repository = "https://github.com/JeanCASPAR/snow-plow"
 keywords = ["nix", "flake", "nixos"]
 categories = ["command-line-utilities", "config"]
+exclude = [
+    "flake.*",
+    ".envrc",
+]
 
 [dependencies]
 ansi_term = "0.12.1"

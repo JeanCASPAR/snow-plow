@@ -7,7 +7,10 @@
       url = github:oxalica/rust-overlay;
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    naersk.url = github:nix-community/naersk;
+    naersk = {
+      url = github:nix-community/naersk;
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = { self, nixpkgs, utils, naersk, rust-overlay }:
@@ -29,22 +32,28 @@
       in {
         defaultPackage = naerskLib.buildPackage {
           pname = "snow-plow";
-          root = ./.;
+          src = ./.;
           nativeBuildInputs = [ pkgs.installShellFiles ];
           # man files and shell completions
+          postBuild = ''
+            mkdir ./artifacts
+            cd ./artifacts
+
+            echo $(ls ../target/release)
+            cat $cargo_build_output_json
+            ../target/release/snow-plow gen-man
+
+            ../target/release/snow-plow gen-completion bash
+            ../target/release/snow-plow gen-completion fish
+            ../target/release/snow-plow gen-completion zsh
+          '';
           postInstall = ''
-            mkdir $out/artifacts
-            cd $out/artifacts
-
-            $out/bin/snow-plow gen-man
-            installManPage ./*.1
-
-            cd $out/share
-            rm -r $out/artifacts
-
-            $out/bin/snow-plow gen-completion bash
-            $out/bin/snow-plow gen-completion fish
-            $out/bin/snow-plow gen-completion zsh
+            installManPage $out/artifacts/*.1
+            installShellCompletion \
+              --bash $out/artifacts/snow-plow.bash
+              --fish $out/artifacts/snow-plow.fish
+              --zsh $out/artifacts/_snow-plow
+            rm $out/artifacts
           '';
         };
         defaultApp = utils.lib.mkApp {
