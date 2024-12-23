@@ -84,6 +84,8 @@ enum Error {
     TrackedFlake(String),
     /// When removing a flake that is not tracked.
     MissingFlake(String),
+    /// When updating a flake which is not tracked.
+    NoFlake(String),
     /// An internal error occured.
     Internal(Box<dyn ErrorTrait>),
 }
@@ -110,6 +112,7 @@ impl Error {
             }
             Error::TrackedFlake(name) => format!("flake `{}` is already tracked", name),
             Error::MissingFlake(name) => format!("flake `{}` is not tracked", name),
+            Error::NoFlake(name) => format!("no flake named `{}`", name),
             Error::Internal(e) => format!("internal: {}", e),
         }
     }
@@ -192,7 +195,27 @@ impl Interface {
         Ok(())
     }
 
-    fn update_flakes(&self) -> Result<(), Vec<Error>> {
+    fn update_flakes(&self, name : Option<String>) -> Result<(), Vec<Error>> {
+        if let Some(name) = name {
+            let Some((name, flake)) = self.flakes.iter().find(|(n, _)| *n == &name)
+            else {
+                Self::handle_errors(vec![Error::NoFlake(name)], true, self.stderr_style);
+                unreachable!();
+            };
+
+            if flake.enabled {
+                println!(
+                    "updating flake `{}` at \"{}\"",
+                    name,
+                    flake.path.display(),
+                );
+                if let Err(errors) = self.update_flake(&flake.path) {
+                    Self::handle_errors(errors, true, self.stderr_style);
+                }
+            }
+
+            Ok(())
+        } else {
         let nb = self
             .flakes
             .iter()
@@ -214,6 +237,7 @@ impl Interface {
             }
         }
         Ok(())
+    }
     }
 
     fn list_flakes(&self, filter: ListFilter) -> Result<(), Vec<Error>> {
@@ -534,8 +558,8 @@ pub enum Commands {
     Disable { name: String },
     /// Remove a flake from the list, so that SnowPlow doesn't manage it anymore.
     Remove { name: String },
-    /// Update all enabled flakes at once.
-    Update,
+    /// Update the specified flake if a name is given, or all enabled flakes at once if no name is given.
+    Update { name : Option<String> },
     /// List all tracked flakes, their path and status.
     List {
         #[command(flatten)]
@@ -602,7 +626,7 @@ fn main() {
         Commands::Enable { name } => interface.enable_flake(name),
         Commands::Disable { name } => interface.disable_flake(name),
         Commands::Remove { name } => interface.remove_flake(name),
-        Commands::Update => interface.update_flakes(),
+        Commands::Update { name } => interface.update_flakes(name),
         Commands::List { filter } => interface.list_flakes(filter),
         Commands::GenCompletion { .. } | Commands::GenMan => unreachable!(),
         Commands::Info { name } => interface.info_flake(name),
