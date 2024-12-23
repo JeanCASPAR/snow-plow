@@ -7,7 +7,10 @@
       url = github:oxalica/rust-overlay;
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    naersk.url = github:nix-community/naersk;
+    naersk = {
+      url = github:nix-community/naersk;
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = { self, nixpkgs, utils, naersk, rust-overlay }:
@@ -19,17 +22,17 @@
             rust-overlay.overlays.default
           ];
         };
-        rust = pkgs.rust-bin.stable.latest.default.override {
+        toolchain = pkgs.rust-bin.stable.latest.default.override {
           extensions = [ "rust-src" "clippy" ];
         };
-        naerskLib = naersk.lib.${system}.override {
-          cargo = rust;
-          rustc = rust;
+        naersk' = pkgs.callPackage naersk {
+          cargo = toolchain;
+          rustc = toolchain;
         };
       in {
-        defaultPackage = naerskLib.buildPackage {
+        defaultPackage = naersk'.buildPackage {
           pname = "snow-plow";
-          root = ./.;
+          src = ./.;
           nativeBuildInputs = [ pkgs.installShellFiles ];
           # man files and shell completions
           postInstall = ''
@@ -37,14 +40,21 @@
             cd $out/artifacts
 
             $out/bin/snow-plow gen-man
-            installManPage ./*.1
-
-            cd $out/share
-            rm -r $out/artifacts
 
             $out/bin/snow-plow gen-completion bash
             $out/bin/snow-plow gen-completion fish
             $out/bin/snow-plow gen-completion zsh
+
+            cd $out
+
+            installManPage $out/artifacts/*.1
+            installShellCompletion \
+              --cmd snow-plow \
+              --bash $out/artifacts/snow-plow.bash \
+              --fish $out/artifacts/snow-plow.fish \
+              --zsh $out/artifacts/_snow-plow
+
+            rm -r $out/artifacts
           '';
         };
         defaultApp = utils.lib.mkApp {
@@ -52,7 +62,7 @@
         };
         devShell = with pkgs; mkShell {
           packages = [
-            rust
+            toolchain
             cargo
             rustfmt
             rustPackages.clippy
