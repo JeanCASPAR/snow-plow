@@ -30,7 +30,7 @@
           rustc = toolchain;
         };
       in {
-        defaultPackage = naersk'.buildPackage {
+        packages.default = naersk'.buildPackage {
           pname = "snow-plow";
           src = ./.;
           nativeBuildInputs = [ pkgs.installShellFiles ];
@@ -57,8 +57,8 @@
             rm -r $out/artifacts
           '';
         };
-        defaultApp = utils.lib.mkApp {
-          drv = self.defaultPackage.${system};
+        apps.default = utils.lib.mkApp {
+          drv = self.package.${system}.default;
         };
         devShell = with pkgs; mkShell {
           packages = [
